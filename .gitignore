@@ -18,7 +18,8 @@ build/
 
 # Node / NestJS
 node_modules/
-dist/
+backend/dist/
+backend/.env
 .env
 .env.*
 

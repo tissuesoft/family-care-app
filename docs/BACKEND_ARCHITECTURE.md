@@ -2,7 +2,111 @@
 
 > **기준**: design 폴더 14개 화면 UI만 분석. 화면에 없는 필드는 추가하지 않음.  
 > **인증**: 카카오 로그인만 (Supabase Auth Kakao OAuth)  
-> **DB**: Supabase (PostgreSQL) · **API**: NestJS
+> **DB**: Supabase (PostgreSQL) · **API**: NestJS  
+> **문서 버전**: 1.1
+
+---
+
+## 0. 앱 개요 · 화면 흐름 (구현 기준)
+
+### 0.1 앱 정체성
+
+| 축 | 설명 | 화면 근거 |
+|----|------|-----------|
+| 본인 건강 관리 | 약·걸음·기분·건강 점수 | 홈, 약, 걸음, 리포트 |
+| 가족 안심 | “오늘도 괜찮아요” 체크 → 가족이 확인 | 홈, 가족 탭 |
+| 이상 징후 대응 | 미복용·미체크·활동 급감 → 알림 | 가족 상세, 잠금화면, 걸음 |
+| 장기 추적 | 일/주/월 리포트·인사이트 | 건강 리포트, 가족 상세 |
+
+### 0.2 하단 탭 역할
+
+| 탭 | 역할 | 홈과의 관계 |
+|----|------|-------------|
+| **홈** | 오늘 나 + 선택 그룹 가족 요약 | 매일 첫 진입·대시보드 |
+| **가족** | 그룹 전체 현황·구성원 상세 | 홈 가족 섹션 `전체보기` 확장 |
+| **걸음** | 목표·주간·월간·가족 비교 | 홈 걸음 섹션 확장 |
+| **약** | 내 복용 / 가족 현황 | 홈 약 섹션 확장 |
+| **설정** | 알림·공개범위·그룹 관리 | 전역 설정 |
+
+### 0.3 홈 화면 구조 (위 → 아래, 구현 순서)
+
+홈은 **“오늘 내 상태 + 선택 그룹 가족 요약”** 대시보드이다. 상세·차트·알림 발송은 각 탭/전용 화면으로 위임한다.
+
+| 순서 | UI 섹션 | 사용자 행동 | 연결 API/화면 |
+|------|---------|-------------|---------------|
+| ① | 오늘 내 건강 점수 | 조회 | `daily_health_scores` · 탭 → 건강 리포트 |
+| ② | 오늘 안심 체크 | `오늘도 괜찮아요` 탭 | `POST /safety-checks` |
+| ③ | 오늘 가족 건강 현황 | 그룹 탭 전환 · `전체보기` | `GET /home?group_id=` · 가족 탭 |
+| ④ | 오늘 약 복용 | 복용 체크 | `POST /medications/intake-logs` · 약 탭 |
+| ⑤ | 오늘 기분 | 이모지 선택 | `PUT /mood/today` |
+| ⑥ | 내 걸음 수 | 조회 | `PUT /steps/sync` · 걸음 탭 |
+
+**건강 점수 카드 하단 아이콘 3개**(안심·걸음·약)는 `completed_tasks`로 표현 — 오늘 핵심 항목 완료 여부.
+
+### 0.4 화면 네비게이션 맵
+
+```
+[카카오 로그인]
+    → (선택) 가족 초대하기 ──► POST /family/invitations/join
+    → 홈
+
+홈
+ ├─ [건강 점수 카드] ──────────► 내 건강 리포트 (일/주/월)
+ ├─ [안심 체크 버튼] ──────────► POST /safety-checks
+ ├─ [가족 섹션 · 전체보기] ────► 가족 탭 · GET /family/groups/:id/dashboard/today
+ │       └─ [구성원 행 탭] ────► GET /family/members/:userId/detail?group_id=
+ ├─ [약 섹션] ─────────────────► 약 탭 · GET /medications/today
+ ├─ [기분] ────────────────────► PUT /mood/today
+ └─ [걸음] ────────────────────► 걸음 탭 · GET /steps/today
+
+가족 탭
+ ├─ 그룹 탭 전환 (우리 가족 / 나와 아내 / 친구들)
+ ├─ [상세 >] ─────────────────► 구성원 상세 (일/주/월)
+ ├─ [알림 보내기] ─────────────► POST /medications/remind/:userId
+ ├─ [안심 확인 요청] ──────────► POST /family/members/:id/safety-check-requests
+ └─ [+ 가족 초대하기] ─────────► 가족 초대 화면
+
+설정
+ ├─ 건강 리포트 ───────────────► GET /health-reports/me
+ ├─ 가족 구성원 / 초대 ────────► GET /family/groups
+ └─ 알림·공개범위 ─────────────► PATCH /settings/*
+```
+
+### 0.5 하루 데이터 흐름
+
+```
+아침   앱 실행 → GET /home?group_id=
+       → POST /safety-checks (괜찮아요)
+       → POST /medications/intake-logs (혈압약 등)
+
+낮    PUT /steps/sync (센서)
+       → 푸시: 당뇨약 예정 → 잠금화면 [복용완료|나중에]
+
+저녁   PUT /mood/today
+       → 배치: daily_health_scores 계산
+
+가족  GET /home 또는 가족 탭에서 미체크·미복용 확인
+       → remind / safety-check-request → FCM
+```
+
+### 0.6 다중 그룹 모델 (핵심)
+
+**한 사용자는 여러 `family_groups`에 동시에 속할 수 있다.**
+
+| 개념 | 설명 |
+|------|------|
+| `family_groups` | 독립된 그룹 단위 (예: 우리 가족, 나와 아내, 친구들) |
+| `family_group_members` | 사용자 ↔ 그룹 M:N. **관계 라벨은 그룹마다 다름** (A그룹에선 `아들`, B그룹에선 `나`) |
+| `group_type` | `family` \| `couple` \| `friends` — 기본 탭 스타일 힌트 |
+| `name` | 탭에 표시되는 라벨 (예: `우리 가족`). null이면 `group_type` 기본 문구 |
+| `active_group_id` | 홈·가족·약(가족현황) 등 **현재 선택된 그룹**. 클라이언트 저장 + 서버 `user_preferences` 동기화 |
+
+**그룹 스코프 규칙**
+
+- 대시보드·가족 목록·가족 비교 API → **반드시 `group_id`로 필터**
+- 프라이버시(걸음/약/기분/점수) → **사용자 단위** (`user_privacy_settings`). 그룹과 무관
+- 타인 데이터 조회 권한 → **요청한 `group_id` 안에서 둘 다 멤버**인지 검증 (`is_group_member`)
+- 동일 두 사용자가 여러 그룹에 함께 있어도, API는 호출 시 넘긴 `group_id` 기준으로만 멤버 목록·집계
 
 ---
 
@@ -44,13 +148,16 @@
 
 | 기능 | 근거 화면 | 비고 |
 |------|-----------|------|
-| 가족 그룹 멤버 목록 | 홈, 가족 현황, 설정 | |
+| **다중 그룹 소속** | 홈, 가족 현황 | 탭 3종 = 최소 3개 그룹 예시. 사용자는 N개 그룹 가능 |
+| 그룹 생성 | (탭·초대 흐름상 필요) | 첫 초대 시 그룹 자동 생성 또는 명시적 생성 |
 | 그룹 탭 전환 | 홈, 가족 현황 | `우리 가족` / `나와 아내` / `친구들` |
-| 구성원 관계 라벨 | 전 화면 | 어머니, 아버지, 아들, 딸 |
+| 선택 그룹 유지 | 홈 UX | `active_group_id` — 앱 재실행 시 마지막 탭 복원 |
+| 가족 그룹 멤버 목록 | 홈, 가족 현황, 설정 | **선택된 group_id 기준** |
+| 구성원 관계 라벨 | 전 화면 | 어머니, 아버지, 아들, 딸 — **그룹별로 다를 수 있음** |
 | 구성원 역할 뱃지 | 설정 | 부모, 뒷바라지(후원자) |
 | 구성원 나이·이름 표시 | 홈, 가족 현황 | 김순자 68세 등 |
-| 가족 초대 | 가족 현황, 설정 | |
-| 가족 구성원 상세 진입 | 가족 현황 `상세 >` | |
+| 가족 초대 (그룹 단위) | 가족 현황, 설정, 초대 화면 | `family_group_id` 지정 |
+| 가족 구성원 상세 진입 | 가족 현황 `상세 >` | `group_id` + `user_id` |
 
 ### 1.3 안심 체크
 
@@ -160,31 +267,94 @@
 
 ## 2. 화면별 필요한 데이터
 
-### 2.1 홈
+### 2.0 공통 타입 (코드 생성용)
 
-```json
+**`safety_check_status`** (가족 카드·홈): `completed` | `waiting`  
+- UI: `안심 완료` / `안심 대기`  
+- 본인 이력·리포트: `completed` | `incomplete`
+
+**`medication_status`**: `taken` | `missed` | `scheduled` | `pending`
+
+**`mood_level`**: `1`~`5` (1=매우 나쁨 … 5=매우 좋음, 홈에서 4번 선택 예시)
+
+| level | UI 라벨 (화면 예시) |
+|-------|---------------------|
+| 1~2 | (슬픈 쪽 이모지) |
+| 3 | 기분 보통 |
+| 4~5 | 기분 좋음 |
+
+**`health_score_status_label`**: `좋음` 등 — 점수 구간별. 홈 87점=`좋음` (구간 테이블은 클라이언트 또는 서버 상수)
+
+**`FamilyGroupSummary`** (탭·목록 공통):
+
+```typescript
 {
-  "my_health_score": { "score": 87, "percent": 87, "status_label": "좋음", "tasks_completed": ["safety_check", "steps", "medication"] },
-  "my_safety_check": { "status": "completed", "completed_at": "13:24" },
-  "family_groups": [{ "id": "...", "tab_label": "우리 가족", "members": [...] }],
-  "my_medications_today": [...],
-  "my_mood_today": { "level": 4, "label": "기분 좋음" },
-  "my_steps_today": { "steps": 6248, "goal": 10000, "remaining": 3752, "weekly_bars": [...] }
+  id: string;
+  group_type: 'family' | 'couple' | 'friends';
+  tab_label: string;        // name ?? group_type 기본 라벨
+  member_count: number;
+  is_active: boolean;       // 현재 선택 탭
 }
 ```
 
-**가족 멤버 카드 (각 항목)**  
-`relationship_label`, `display_name`, `age`, `safety_check_status`, `steps`, `medications[{name, status}]`, `mood_label`
+### 2.1 홈
+
+**역할**: §0.3 참고. `GET /v1/home?group_id=` 한 번에 로드.
+
+```json
+{
+  "active_group_id": "grp-family-uuid",
+  "available_groups": [
+    { "id": "grp-family-uuid", "group_type": "family", "tab_label": "우리 가족", "member_count": 4, "is_active": true },
+    { "id": "grp-couple-uuid", "group_type": "couple", "tab_label": "나와 아내", "member_count": 2, "is_active": false },
+    { "id": "grp-friends-uuid", "group_type": "friends", "tab_label": "친구들", "member_count": 5, "is_active": false }
+  ],
+  "my_health_score": {
+    "score": 87,
+    "percent": 87,
+    "status_label": "좋음",
+    "completed_tasks": ["safety_check", "steps", "medication"]
+  },
+  "my_safety_check": {
+    "status": "completed",
+    "completed_at": "2025-01-27T13:24:00+09:00",
+    "message": "가족들이 확인할 수 있어요"
+  },
+  "active_group": {
+    "group_id": "grp-family-uuid",
+    "tab_label": "우리 가족",
+    "view_all_href": "/family/groups/grp-family-uuid/dashboard/today",
+    "members": []
+  },
+  "my_medications_today": [],
+  "my_mood_today": { "level": 4, "label": "기분 좋음" },
+  "my_steps_today": {
+    "steps": 6248,
+    "goal": 10000,
+    "remaining": 3752,
+    "weekly_bars": [{ "weekday": "mon", "steps": 5200 }]
+  }
+}
+```
+
+**`active_group.members[]` 각 항목**  
+`user_id`, `relationship_label`, `display_name`, `age`, `safety_check_status`, `steps`, `medications[{name, status}]`, `mood_label`
+
+**서버 검증**: `group_id` 없으면 `user_preferences.last_active_group_id` 사용. 둘 다 없으면 가입 그룹 중 `joined_at` 최신 또는 `member_count` 최대 그룹.
 
 ### 2.2 오늘 가족 건강 현황
 
+- **필수 query**: `group_id`
 - 집계: `total_members`, `safety_completed_count`, `safety_completion_percent`, `avg_steps`, `medication_summary` (2/3)
-- 멤버 카드: 홈과 동일 + `last_updated_at`, `detail_link`
-- CTA: 초대 버튼
+- `available_groups[]`: 홈과 동일 (탭 전환)
+- 멤버 카드: 홈 `active_group.members`와 동일 + `last_updated_at`, `detail_href` (`/family/members/:userId/detail?group_id=`)
+- CTA: `+ 가족 초대하기` → `POST /family/invitations` body에 `family_group_id`
 
 ### 2.3 가족 구성원 상세 (일/주/월 공통 골격)
 
-- `member`: 이름·관계·나이
+- **필수 query**: `group_id`, `period` (today|week|month), `date`
+- **권한**: 요청자와 대상이 **동일 group_id의 멤버**인지 검증
+- `member`: 이름·관계·나이 (관계는 **이 그룹 기준** relationship_label)
 - `safety_check_status`, `last_safety_check_at`
 - `can_send_safety_request`: boolean
 - `period`: today | week | month + `date_range`
@@ -213,6 +383,7 @@
 
 ### 2.6 약 복용 — 가족 현황
 
+- **필수 query**: `group_id`
 - `summary`: completed_count, missed_count
 - `family_members[]`: meds + status + `send_notification` 가능 여부
 - `my_schedule_preview[]`, `my_streak`, `my_monthly_rate`, `weekly_chart`
@@ -220,14 +391,15 @@
 ### 2.7 내 걸음 수
 
 - `today`: steps, percent, goal, remaining, kcal, distance_km, duration_min
-- `family_activity_alert` (nullable)
-- `weekly_chart[]`, `family_steps_today[]`
+- `family_activity_alert` (nullable) — **특정 그룹 멤버** 기준. query `group_id` 권장
+- `weekly_chart[]`, `family_steps_today[]` — **query `group_id`** 시 해당 그룹 멤버만
 - `monthly_stats`: daily_avg, max_record, max_date, streak_days, `heatmap[]`
 
 ### 2.8 설정
 
 - `profile`: name, is_premium
-- `family_members[]`: relationship, role_badge, sharing_status_text
+- `my_groups[]`: `{ group_id, tab_label, member_count, my_relationship_label, my_role_badge }` — **소속 그룹 전체 목록**
+- `family_members[]`: **기본 표시 그룹** 구성원 (query `group_id` 또는 last_active)
 - `notification_settings` (6 toggles + time)
 - `privacy_settings[]`: data_type, visibility
 - `plan_info`, `app_version`
@@ -275,6 +447,7 @@
 └─────────────────┘
 
 profiles 1──1 user_notification_settings
+profiles 1──1 user_preferences (last_active_group_id)
 profiles 1──* user_privacy_settings (data_type별 행)
 
 profiles 1──* medications
@@ -294,8 +467,9 @@ profiles 1──* daily_health_scores (score_date UNIQUE)
 | 테이블 | 목적 | 화면 근거 |
 |--------|------|-----------|
 | profiles | 사용자 프로필 | 설정, 홈 이름 |
-| family_groups | 그룹(가족/커플/친구 탭) | 홈 탭 3종 |
-| family_group_members | 그룹-사용자 M:N + 관계 | 전 화면 |
+| family_groups | **독립 그룹 N개**. 사용자는 여러 그룹 소속 가능 | 홈 탭 3종 |
+| family_group_members | 그룹-사용자 M:N + **그룹별** 관계 라벨 | 전 화면 |
+| user_preferences | 마지막 선택 그룹 `last_active_group_id` | 홈 탭 복원 |
 | family_invitations | 초대 코드 | 초대 화면 |
 | medications | 약 마스터 | 내 복용 목록 |
 | medication_intake_logs | 일별 복용 기록 | 복용 체크 전 화면 |
@@ -323,7 +497,16 @@ profiles 1──* daily_health_scores (score_date UNIQUE)
 
 **Base URL**: `https://api.example.com/v1`  
 **인증**: `Authorization: Bearer <supabase_jwt>`  
-**공통 Query**: `group_id` (가족 탭 컨텍스트), `date` / `week` / `month`
+
+### 공통 Query 파라미터
+
+| 파라미터 | 필수 | 사용 API | 설명 |
+|----------|------|----------|------|
+| `group_id` | 가족 스코프 API에서 **필수** | `/home`, `/family/*`, `/medications/family-status`, `/steps/family/*`, `/health-reports/family-comparison` | 현재 선택 그룹 |
+| `date` | 선택 | 리포트·상세 | 기준일 `YYYY-MM-DD` |
+| `period` | 선택 | 리포트·상세 | `today` \| `week` \| `month` |
+
+**`group_id` 생략 시**: `user_preferences.last_active_group_id` → 없으면 400 `GROUP_ID_REQUIRED`.
 
 ### 4.1 Auth
 
@@ -337,13 +520,16 @@ profiles 1──* daily_health_scores (score_date UNIQUE)
 
 | Method | Path | 설명 |
 |--------|------|------|
-| GET | `/family/groups` | 내가 속한 그룹 목록 (탭용) |
-| GET | `/family/groups/:groupId/members` | 구성원 목록 |
+| GET | `/family/groups` | 내가 속한 **전체** 그룹 목록 (탭용) |
+| POST | `/family/groups` | 새 그룹 생성 (body: `group_type`, `name?`) |
+| PATCH | `/family/groups/:groupId` | 그룹 이름 수정 |
+| GET | `/family/groups/:groupId/members` | 해당 그룹 구성원만 |
 | GET | `/family/groups/:groupId/dashboard/today` | 가족 현황 집계+카드 |
-| GET | `/family/members/:userId/detail` | 구성원 상세 (query: period=today\|week\|month) |
-| POST | `/family/invitations` | 초대 코드 생성 |
-| POST | `/family/invitations/join` | 코드로 가입 |
-| POST | `/family/members/:userId/safety-check-requests` | 안심 확인 요청 |
+| GET | `/family/members/:userId/detail` | 구성원 상세. **query: `group_id`, `period`, `date`** |
+| POST | `/family/invitations` | 초대 코드 생성 (body: `family_group_id`) |
+| POST | `/family/invitations/join` | 코드로 **지정 그룹** 가입 |
+| POST | `/family/members/:userId/safety-check-requests` | 안심 확인 요청. **query: `group_id`** |
+| PATCH | `/user/preferences` | `last_active_group_id` 저장 (탭 전환 시) |
 
 ### 4.3 Safety Check
 
@@ -360,7 +546,7 @@ profiles 1──* daily_health_scores (score_date UNIQUE)
 | POST | `/medications` | 약 추가 |
 | PATCH | `/medications/:id` | 약 수정 |
 | GET | `/medications/today` | 오늘 스케줄+상태 |
-| GET | `/medications/family-status` | 가족 현황 탭 |
+| GET | `/medications/family-status` | 가족 현황 탭. **query: `group_id` 필수** |
 | POST | `/medications/intake-logs` | 복용 완료 기록 |
 | POST | `/medications/intake-logs/:id/snooze` | 나중에 알림 |
 | POST | `/medications/remind/:userId` | 가족에게 알림 보내기 |
@@ -373,7 +559,7 @@ profiles 1──* daily_health_scores (score_date UNIQUE)
 | GET | `/steps/today` | 오늘 상세 |
 | GET | `/steps/weekly` | 주간 차트 |
 | GET | `/steps/monthly` | 월간 통계+히트맵 |
-| GET | `/steps/family/today` | 가족 오늘 비교 |
+| GET | `/steps/family/today` | 가족 오늘 비교. **query: `group_id` 필수** |
 | PUT | `/steps/sync` | 걸음 데이터 동기화 (클라이언트 센서) |
 
 ### 4.6 Mood
@@ -388,13 +574,13 @@ profiles 1──* daily_health_scores (score_date UNIQUE)
 | Method | Path | 설명 |
 |--------|------|------|
 | GET | `/health-reports/me` | 내 리포트 (query: period, date) |
-| GET | `/health-reports/family-comparison` | 가족 점수 비교 |
+| GET | `/health-reports/family-comparison` | 가족 점수 비교. **query: `group_id`, `period`, `date`** |
 
 ### 4.8 Home
 
 | Method | Path | 설명 |
 |--------|------|------|
-| GET | `/home` | 홈 대시보드 일괄 (query: group_id) |
+| GET | `/home` | 홈 대시보드. **query: `group_id` 권장** (없으면 last_active) |
 
 ### 4.9 Settings
 
@@ -440,6 +626,12 @@ CREATE UNIQUE INDEX idx_invitations_code ON family_invitations (invite_code) WHE
 
 -- medications
 CREATE INDEX idx_medications_user_active ON medications (user_id) WHERE is_active = true;
+
+-- user_preferences
+CREATE INDEX idx_user_prefs_group ON user_preferences (last_active_group_id);
+
+-- safety_check_requests
+CREATE INDEX idx_scr_group_date ON safety_check_requests (family_group_id, request_date DESC);
 ```
 
 ---
@@ -455,12 +647,28 @@ CREATE INDEX idx_medications_user_active ON medications (user_id) WHERE is_activ
 
 ### 6.2 접근 규칙
 
-1. **본인 데이터**: 항상 CRUD (자기 user_id)
-2. **가족 그룹 멤버 데이터**: `family_group_members`로 같은 `group_id` 확인 후 조회
-3. **필드별 프라이버시**: `user_privacy_settings.visibility = 'only_me'`이면 타인 조회 차단
-4. **쓰기 권한**: 타인의 안심체크·복용·기분 기록 불가. 예외: `safety_check_requests`, `medications/remind` (요청/알림만)
+1. **본인 데이터**: 항상 CRUD (자기 `user_id`)
+2. **그룹 스코프 API**: 호출자가 `group_id`의 `family_group_members`에 있어야 함 (`is_group_member(auth.uid(), group_id)`)
+3. **타인 데이터 조회**: 위 그룹 멤버십 + `user_privacy_settings` 통과
+4. **쓰기 권한**: 타인의 안심체크·복용·기분 기록 불가. 예외: `safety_check_requests`, `medications/remind` (요청·알림만)
+5. **다중 그룹**: 동일 두 사용자가 그룹 A·B에 함께 있어도, API는 **요청 `group_id`의 멤버만** 목록·집계에 포함
 
-### 6.3 RLS 정책 요약
+### 6.3 RLS 헬퍼
+
+```sql
+-- 특정 그룹의 멤버인지
+is_group_member(user_id UUID, group_id UUID) → boolean
+
+-- 특정 그룹 안에서 viewer가 target 데이터를 볼 수 있는지
+can_view_data_in_group(viewer, target, group_id, dtype) → boolean
+  := is_group_member(viewer, group_id)
+  AND is_group_member(target, group_id)
+  AND (viewer = target OR privacy allows)
+```
+
+기존 `is_same_family_group(viewer, target)` — **어느 그룹이든** 함께 있으면 true. 대시보드 필터용이 아니라 레거시·보조 검증용. **신규 API는 `group_id` 스코프 우선.**
+
+### 6.4 RLS 정책 요약
 
 | 테이블 | SELECT | INSERT/UPDATE |
 |--------|--------|---------------|
@@ -506,7 +714,8 @@ CREATE TABLE profiles (
 CREATE TABLE family_groups (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   group_type group_type NOT NULL,
-  name TEXT,  -- 탭 라벨 매핑은 앱에서 group_type 기반 가능
+  name TEXT,  -- 탭 라벨: "우리 가족", "나와 아내", "친구들". null이면 group_type 기본 문구
+  created_by UUID REFERENCES profiles(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -514,10 +723,17 @@ CREATE TABLE family_group_members (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   family_group_id UUID NOT NULL REFERENCES family_groups(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-  relationship_label TEXT NOT NULL,  -- 어머니, 아버지, 아들, 딸
+  relationship_label TEXT NOT NULL,  -- 이 그룹 안에서의 호칭: 어머니, 아버지, 아들, 딸
   member_role member_role,
   joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (family_group_id, user_id)
+);
+
+-- 사용자당 1행: 마지막 선택 그룹 (홈 탭 복원)
+CREATE TABLE user_preferences (
+  user_id UUID PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+  last_active_group_id UUID REFERENCES family_groups(id) ON DELETE SET NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE family_invitations (
@@ -566,6 +782,7 @@ CREATE TABLE safety_checks (
 
 CREATE TABLE safety_check_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  family_group_id UUID NOT NULL REFERENCES family_groups(id) ON DELETE CASCADE,
   target_user_id UUID NOT NULL REFERENCES profiles(id),
   requester_user_id UUID NOT NULL REFERENCES profiles(id),
   request_date DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -650,7 +867,18 @@ ALTER TABLE daily_health_scores ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_notification_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_privacy_settings ENABLE ROW LEVEL SECURITY;
 
--- helper: same family group
+ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
+
+-- helper: group membership
+CREATE OR REPLACE FUNCTION is_group_member(check_user UUID, check_group UUID)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM family_group_members
+    WHERE user_id = check_user AND family_group_id = check_group
+  );
+$$;
+
+-- helper: same family group (any shared group)
 CREATE OR REPLACE FUNCTION is_same_family_group(viewer UUID, target UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT EXISTS (
@@ -659,6 +887,23 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
     JOIN family_group_members b ON a.family_group_id = b.family_group_id
     WHERE a.user_id = viewer AND b.user_id = target
   );
+$$;
+
+CREATE OR REPLACE FUNCTION can_view_data_in_group(
+  viewer UUID, target UUID, check_group UUID, dtype privacy_data_type
+)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT
+    is_group_member(viewer, check_group)
+    AND is_group_member(target, check_group)
+    AND (
+      viewer = target
+      OR COALESCE(
+        (SELECT visibility FROM user_privacy_settings
+         WHERE user_id = target AND data_type = dtype),
+        'family'::privacy_visibility
+      ) = 'family'
+    );
 $$;
 
 CREATE OR REPLACE FUNCTION can_view_data(viewer UUID, owner UUID, dtype privacy_data_type)
@@ -744,7 +989,58 @@ export class SupabaseAuthGuard implements CanActivate {
 }
 ```
 
-### Home Controller 예시
+### Home Service 조립 로직 (구현 가이드)
+
+```typescript
+async getDashboard(userId: string, groupId?: string) {
+  const groups = await this.familyService.listMyGroups(userId);
+  const activeGroupId = groupId
+    ?? (await this.prefs.getLastActiveGroupId(userId))
+    ?? groups[0]?.id;
+  if (!activeGroupId) throw new BadRequestException('GROUP_ID_REQUIRED');
+
+  await this.prefs.setLastActiveGroupId(userId, activeGroupId);
+  await this.familyService.assertMember(userId, activeGroupId);
+
+  const memberIds = await this.familyService.getMemberUserIds(activeGroupId);
+  const today = startOfDayKST();
+
+  const [myScore, mySafety, myMeds, myMood, mySteps, ...memberSnapshots] =
+    await Promise.all([
+      this.healthScore.getForUser(userId, today),
+      this.safetyCheck.getToday(userId, today),
+      this.medication.getTodaySchedule(userId, today),
+      this.mood.getToday(userId, today),
+      this.steps.getTodayWithWeekly(userId, today),
+      ...memberIds
+        .filter((id) => id !== userId)
+        .map((id) => this.buildMemberSnapshot(userId, id, activeGroupId, today)),
+    ]);
+
+  return {
+    active_group_id: activeGroupId,
+    available_groups: groups.map((g) => ({
+      ...g,
+      is_active: g.id === activeGroupId,
+    })),
+    my_health_score: myScore,
+    my_safety_check: mySafety,
+    active_group: {
+      group_id: activeGroupId,
+      tab_label: groups.find((g) => g.id === activeGroupId)!.tab_label,
+      view_all_href: `/family/groups/${activeGroupId}/dashboard/today`,
+      members: memberSnapshots,
+    },
+    my_medications_today: myMeds,
+    my_mood_today: myMood,
+    my_steps_today: mySteps,
+  };
+}
+
+// 멤버 스냅샷: can_view_data_in_group 실패 시 해당 필드 null 또는 생략
+```
+
+### Home Controller
 
 ```typescript
 @Controller('v1/home')
@@ -755,7 +1051,7 @@ export class HomeController {
   @Get()
   getHome(
     @CurrentUser() user: User,
-    @Query('group_id') groupId: string,
+    @Query('group_id') groupId?: string,
   ) {
     return this.homeService.getDashboard(user.id, groupId);
   }
@@ -766,10 +1062,16 @@ export class HomeController {
 
 ## 9. API Response 예시
 
-### GET `/v1/home?group_id=grp-uuid`
+### GET `/v1/home?group_id=grp-family-uuid`
 
 ```json
 {
+  "active_group_id": "grp-family-uuid",
+  "available_groups": [
+    { "id": "grp-family-uuid", "group_type": "family", "tab_label": "우리 가족", "member_count": 4, "is_active": true },
+    { "id": "grp-couple-uuid", "group_type": "couple", "tab_label": "나와 아내", "member_count": 2, "is_active": false },
+    { "id": "grp-friends-uuid", "group_type": "friends", "tab_label": "친구들", "member_count": 5, "is_active": false }
+  ],
   "my_health_score": {
     "score": 87,
     "percent": 87,
@@ -778,12 +1080,13 @@ export class HomeController {
   },
   "my_safety_check": {
     "status": "completed",
-    "completed_at": "2025-01-27T13:24:00+09:00"
+    "completed_at": "2025-01-27T13:24:00+09:00",
+    "message": "가족들이 확인할 수 있어요"
   },
-  "family_tab": {
-    "group_id": "grp-uuid",
-    "group_type": "family",
+  "active_group": {
+    "group_id": "grp-family-uuid",
     "tab_label": "우리 가족",
+    "view_all_href": "/family/groups/grp-family-uuid/dashboard/today",
     "members": [
       {
         "user_id": "u-mother",
@@ -809,6 +1112,28 @@ export class HomeController {
           { "name": "혈압약", "status": "missed" }
         ],
         "mood_label": "기분 보통"
+      },
+      {
+        "user_id": "u-son",
+        "relationship_label": "아들",
+        "display_name": "김민준",
+        "age": 35,
+        "safety_check_status": "completed",
+        "steps": 3112,
+        "medications": [],
+        "mood_label": "기분 좋음"
+      },
+      {
+        "user_id": "u-daughter",
+        "relationship_label": "딸",
+        "display_name": "김지영",
+        "age": 32,
+        "safety_check_status": "completed",
+        "steps": 5953,
+        "medications": [
+          { "name": "비타민", "status": "taken" }
+        ],
+        "mood_label": "기분 좋음"
       }
     ]
   },
@@ -817,12 +1142,12 @@ export class HomeController {
     { "name": "당뇨약", "status": "scheduled", "scheduled_time": "13:00" },
     { "name": "비타민C", "status": "taken" }
   ],
-  "my_mood": { "level": 4, "label": "기분 좋음" },
-  "my_steps": {
+  "my_mood_today": { "level": 4, "label": "기분 좋음" },
+  "my_steps_today": {
     "steps": 6248,
     "goal": 10000,
     "remaining": 3752,
-    "weekly": [
+    "weekly_bars": [
       { "weekday": "mon", "steps": 5200 },
       { "weekday": "tue", "steps": 6100 },
       { "weekday": "wed", "steps": 5800 },
@@ -833,10 +1158,26 @@ export class HomeController {
 }
 ```
 
+### GET `/v1/family/groups`
+
+```json
+{
+  "groups": [
+    { "id": "grp-family-uuid", "group_type": "family", "tab_label": "우리 가족", "member_count": 4 },
+    { "id": "grp-couple-uuid", "group_type": "couple", "tab_label": "나와 아내", "member_count": 2 }
+  ]
+}
+```
+
 ### GET `/v1/family/groups/:groupId/dashboard/today`
 
 ```json
 {
+  "group_id": "grp-family-uuid",
+  "tab_label": "우리 가족",
+  "available_groups": [
+    { "id": "grp-family-uuid", "tab_label": "우리 가족", "is_active": true }
+  ],
   "summary": {
     "total_members": 4,
     "safety_completed_count": 3,
@@ -933,6 +1274,23 @@ export class HomeController {
 }
 ```
 
+### POST `/v1/family/groups`
+
+```json
+{
+  "group_type": "family",
+  "name": "우리 가족"
+}
+```
+
+### PATCH `/v1/user/preferences`
+
+```json
+{
+  "last_active_group_id": "grp-family-uuid"
+}
+```
+
 ### POST `/v1/family/invitations`
 
 ```json
@@ -959,10 +1317,19 @@ export class HomeController {
 }
 ```
 
-### POST `/v1/family/members/u-father/safety-check-requests`
+### POST `/v1/family/members/u-father/safety-check-requests?group_id=grp-family-uuid`
 
 ```json
 {}
+```
+
+### POST `/v1/medications/remind/u-father?group_id=grp-family-uuid`
+
+```json
+{
+  "medication_id": "med-uuid",
+  "intake_date": "2025-01-27"
+}
 ```
 
 ### POST `/v1/medications`
@@ -992,15 +1359,6 @@ export class HomeController {
 ```json
 {
   "snoozed_until": "2025-01-27T13:30:00+09:00"
-}
-```
-
-### POST `/v1/medications/remind/u-father`
-
-```json
-{
-  "medication_id": "med-uuid",
-  "intake_date": "2025-01-27"
 }
 ```
 
@@ -1072,4 +1430,58 @@ export class HomeController {
 
 ---
 
-*문서 버전: 1.0 · 화면 14개 기준*
+## 11. 구현 체크리스트 (Flutter · NestJS)
+
+### 11.1 Flutter 화면 → API 매핑
+
+| 화면 | 최초 로드 API | 사용자 액션 API |
+|------|---------------|-----------------|
+| 홈 | `GET /home?group_id=` | `POST /safety-checks`, `PUT /mood/today`, `PATCH /user/preferences` (탭 전환) |
+| 가족 현황 | `GET /family/groups/:id/dashboard/today` | `PATCH /user/preferences`, 초대·상세 네비 |
+| 가족 상세 | `GET /family/members/:id/detail?group_id=&period=` | safety-request, remind |
+| 내 복용 | `GET /medications/today`, `GET /medications/adherence` | CRUD medications, intake-logs |
+| 가족 현황(약) | `GET /medications/family-status?group_id=` | `POST /medications/remind/:id` |
+| 걸음 | `GET /steps/today`, `weekly`, `monthly`, `family/today?group_id=` | `PUT /steps/sync` |
+| 건강 리포트 | `GET /health-reports/me?period=&date=` | — |
+| 설정 | `GET /settings?group_id=` | PATCH notifications, privacy |
+| 초대 | `POST /family/invitations` | `POST /family/invitations/join` |
+
+### 11.2 그룹 탭 전환 시 클라이언트 동작
+
+1. `PATCH /user/preferences` `{ last_active_group_id }`
+2. 현재 화면이 홈/가족/약(가족)/걸음(가족)이면 **동일 API 재호출** with 새 `group_id`
+3. `available_groups[].is_active` UI 반영
+
+### 11.3 `tab_label` 결정 규칙 (서버)
+
+```typescript
+const DEFAULT_LABELS: Record<GroupType, string> = {
+  family: '우리 가족',
+  couple: '나와 아내',
+  friends: '친구들',
+};
+tab_label = group.name ?? DEFAULT_LABELS[group.group_type];
+```
+
+### 11.4 건강 점수 `completed_tasks` (홈 카드용)
+
+| task key | 완료 조건 (오늘) |
+|----------|------------------|
+| `safety_check` | `safety_checks.status = completed` |
+| `steps` | `daily_steps.total_steps > 0` (또는 목표 % 임계값 — UI는 체크만 표시) |
+| `medication` | 오늘 스케줄 약 전부 `taken` (스케줄 없으면 true) |
+
+`total_score` 산식은 화면에 미표기 → **4개 하위 metric 평균** 또는 가중 평균으로 서버 상수화 후 `daily_health_scores`에 저장.
+
+### 11.5 에러 코드
+
+| code | HTTP | 상황 |
+|------|------|------|
+| `GROUP_ID_REQUIRED` | 400 | 그룹 API에 group_id 없음 |
+| `NOT_GROUP_MEMBER` | 403 | 요청자가 해당 group_id 비멤버 |
+| `TARGET_NOT_IN_GROUP` | 403 | 대상 사용자가 group_id에 없음 |
+| `PRIVACY_DENIED` | 403 | 공개범위 `only_me` |
+
+---
+
+*문서 버전: 1.1 · 화면 14개 기준 · 다중 그룹 · 홈 흐름 반영*
