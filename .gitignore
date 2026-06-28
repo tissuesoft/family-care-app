@@ -1,0 +1,30 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.g.dart
+
+# Node / NestJS
+node_modules/
+dist/
+.env
+.env.*
+
+# Supabase
+.supabase/
+
+# Secrets
+*.pem
+credentials.json
