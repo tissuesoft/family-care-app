@@ -5,7 +5,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../../database/supabase.service';
-import { GroupType, resolveTabLabel } from '../../common/constants/group-labels';
 import { calcAge, todayKstDateString } from '../../common/utils/date.util';
 
 const MOOD_LABELS: Record<number, string> = {
@@ -32,7 +31,7 @@ export class FamilyService {
 
     const { data: groups, error: gErr } = await this.supabase.admin
       .from('family_groups')
-      .select('id, group_type, name')
+      .select('id, name')
       .in('id', groupIds);
     if (gErr) throw gErr;
 
@@ -44,8 +43,7 @@ export class FamilyService {
           .eq('family_group_id', g.id);
         return {
           id: g.id,
-          group_type: g.group_type as GroupType,
-          tab_label: resolveTabLabel(g.group_type as GroupType, g.name),
+          name: g.name,
           member_count: count ?? 0,
           is_active: g.id === activeGroupId,
         };
@@ -228,7 +226,7 @@ export class FamilyService {
 
     return {
       group_id: groupId,
-      tab_label: active?.tab_label ?? '',
+      name: active?.name ?? '',
       available_groups: groups,
       summary: {
         total_members: totalMembers,
@@ -250,15 +248,13 @@ export class FamilyService {
 
   async createGroup(
     userId: string,
-    groupType: GroupType,
-    name?: string,
+    name: string,
     relationshipLabel = '나',
   ) {
     const { data: group, error } = await this.supabase.admin
       .from('family_groups')
       .insert({
-        group_type: groupType,
-        name: name ?? null,
+        name: name.trim(),
         created_by: userId,
       })
       .select()

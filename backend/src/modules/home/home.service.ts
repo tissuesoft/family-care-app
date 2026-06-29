@@ -55,7 +55,7 @@ export class HomeService {
       my_safety_check: await this.getSafetyCheck(userId, date),
       active_group: {
         group_id: activeGroupId,
-        tab_label: activeGroup?.tab_label ?? '',
+        name: activeGroup?.name ?? '',
         view_all_href: `/v1/family/groups/${activeGroupId}/dashboard/today`,
         members,
       },

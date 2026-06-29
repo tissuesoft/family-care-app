@@ -11,8 +11,11 @@ import {
 import { User } from '@supabase/supabase-js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SupabaseAuthGuard } from '../../common/guards/supabase-auth.guard';
-import { GroupType } from '../../common/constants/group-labels';
 import { FamilyService } from './family.service';
+import { CreateGroupDto } from './dto/create-group.dto';
+import { CreateInvitationDto } from './dto/create-invitation.dto';
+import { JoinInviteDto } from './dto/join-invite.dto';
+import { UpdatePreferencesDto } from './dto/update-preferences.dto';
 
 @Controller('v1/family')
 @UseGuards(SupabaseAuthGuard)
@@ -25,13 +28,9 @@ export class FamilyController {
   }
 
   @Post('groups')
-  createGroup(
-    @CurrentUser() user: User,
-    @Body() body: { group_type: GroupType; name?: string; relationship_label?: string },
-  ) {
+  createGroup(@CurrentUser() user: User, @Body() body: CreateGroupDto) {
     return this.familyService.createGroup(
       user.id,
-      body.group_type,
       body.name,
       body.relationship_label,
     );
@@ -48,21 +47,13 @@ export class FamilyController {
   @Post('invitations')
   createInvitation(
     @CurrentUser() user: User,
-    @Body() body: { family_group_id: string },
+    @Body() body: CreateInvitationDto,
   ) {
     return this.familyService.createInvitation(user.id, body.family_group_id);
   }
 
   @Post('invitations/join')
-  joinInvitation(
-    @CurrentUser() user: User,
-    @Body()
-    body: {
-      invite_code: string;
-      relationship_label: string;
-      member_role?: 'parent' | 'caregiver';
-    },
-  ) {
+  joinInvitation(@CurrentUser() user: User, @Body() body: JoinInviteDto) {
     return this.familyService.joinByInviteCode(
       user.id,
       body.invite_code,
@@ -80,7 +71,7 @@ export class UserPreferencesController {
   @Patch('preferences')
   async updatePreferences(
     @CurrentUser() user: User,
-    @Body() body: { last_active_group_id: string },
+    @Body() body: UpdatePreferencesDto,
   ) {
     await this.familyService.assertMember(user.id, body.last_active_group_id);
     await this.familyService.setLastActiveGroupId(
