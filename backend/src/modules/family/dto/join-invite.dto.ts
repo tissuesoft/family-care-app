@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { IsOptional, IsString } from 'class-validator';
 
 export class JoinInviteDto {
   @IsString()
@@ -8,6 +8,6 @@ export class JoinInviteDto {
   relationship_label!: string;
 
   @IsOptional()
-  @IsIn(['parent', 'caregiver'])
-  member_role?: 'parent' | 'caregiver';
+  @IsString()
+  member_role?: string;
 }

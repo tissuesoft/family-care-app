@@ -25,6 +25,7 @@
 ```powershell
 cd backend
 npm run start:dev
+npx --yes serve tools/auth-test -p 5173
 ```
 
 Postman Collection에 **Bearer Token** 한 번 설정해 두면 이후 요청에 자동 적용됩니다.

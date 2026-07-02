@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>카카오 로그인 테스트</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    button { font-size: 1rem; padding: 0.6rem 1.2rem; cursor: pointer; margin-right: 0.5rem; margin-bottom: 0.5rem; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    pre { background: #f4f4f5; padding: 1rem; overflow-x: auto; word-break: break-all; white-space: pre-wrap; }
+    .ok { color: #15803d; }
+    .err { color: #b91c1c; }
+    textarea { width: 100%; min-height: 120px; font-family: monospace; font-size: 12px; }
+    .hint { color: #52525b; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>카카오 로그인 → JWT 받기</h1>
+  <p class="hint">
+  반드시 <strong>http://localhost:5173</strong> 으로 접속하세요.<br>
+  <code>127.0.0.1:5173</code> 이나 주소창에 <code>?code=</code> 붙은 URL을 새로고침하면 PKCE 오류가 납니다.
+  </p>
+
+  <p id="status">스크립트 로딩 중...</p>
+  <button id="loginBtn" type="button" disabled>카카오 로그인</button>
+  <button id="switchBtn" type="button" disabled>다른 카카오 계정으로</button>
+  <button id="resetBtn" type="button" disabled>저장 초기화 후 다시</button>
+  <button id="copyBtn" type="button" disabled>access_token 복사</button>
+
+  <h2>access_token</h2>
+  <textarea id="token" readonly placeholder="로그인 후 표시됩니다"></textarea>
+
+  <h2>API 테스트 (PowerShell)</h2>
+  <pre id="curl"></pre>
+
+  <script type="module">
+    const statusEl = document.getElementById('status');
+    const tokenEl = document.getElementById('token');
+    const curlEl = document.getElementById('curl');
+    const loginBtn = document.getElementById('loginBtn');
+    const switchBtn = document.getElementById('switchBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const copyBtn = document.getElementById('copyBtn');
+
+    const SUPABASE_URL = 'https://nscxlpwokanlqypnyyqw.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5zY3hscHdva2FubHF5cG55eXF3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI2MzYzODAsImV4cCI6MjA5ODIxMjM4MH0.cXzfiugqp9b_5VRso4OWLmfJnF--cC4WkB1J0xgVmS4';
+  const REDIRECT_TO = 'http://localhost:5173/';
+    const STORAGE_KEY = 'family-care-auth-test';
+
+    function setStatus(text, ok = true) {
+      statusEl.textContent = text;
+      statusEl.className = ok ? 'ok' : 'err';
+    }
+
+    function clearAuthStorage() {
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith(STORAGE_KEY) || key.includes('sb-nscxlpwokanlqypnyyqw-auth-token')) {
+          localStorage.removeItem(key);
+        }
+      }
+    }
+
+    function showToken(accessToken) {
+      tokenEl.value = accessToken;
+      copyBtn.disabled = !accessToken;
+      curlEl.textContent =
+        `$token = "${accessToken}"\n` +
+        `Invoke-RestMethod -Uri "http://localhost:3000/v1/auth/me" -Headers @{ Authorization = "Bearer $token" }`;
+    }
+
+    if (window.location.protocol === 'file:') {
+      setStatus('file:// 로 열렸습니다. serve 후 http://localhost:5173 으로 접속하세요.', false);
+      throw new Error('file protocol');
+    }
+
+    if (window.location.host !== 'localhost:5173') {
+      setStatus('http://localhost:5173 으로 접속하세요. (127.0.0.1 은 PKCE 오류 원인)', false);
+    }
+
+    let createClient;
+    try {
+      ({ createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.8/+esm'));
+    } catch (e) {
+      setStatus(`Supabase JS 로드 실패: ${e.message}`, false);
+      throw e;
+    }
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        flowType: 'pkce',
+        detectSessionInUrl: true,
+        persistSession: true,
+        storage: window.localStorage,
+        storageKey: STORAGE_KEY,
+      },
+    });
+
+    async function finishWithSession(session) {
+      if (!session?.access_token) return false;
+      history.replaceState({}, '', REDIRECT_TO);
+      showToken(session.access_token);
+      setStatus('로그인 성공');
+      return true;
+    }
+
+    async function handleCallback() {
+      const params = new URLSearchParams(window.location.search);
+      const oauthError = params.get('error_description') || params.get('error');
+
+      if (oauthError) {
+        setStatus(`OAuth 오류: ${oauthError}`, false);
+        return;
+      }
+
+      if (params.get('code')) {
+        setStatus('로그인 처리 중...');
+        loginBtn.disabled = true;
+
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) {
+          setStatus(`세션 교환 실패: ${error.message}`, false);
+          setStatus(
+            `${error.message} — 아래 [저장 초기화 후 다시] 누르고, 카카오 로그인 버튼부터 다시 시도하세요.`,
+            false,
+          );
+          return;
+        }
+        if (await finishWithSession(session)) return;
+
+        setStatus(
+          'code_verifier를 찾지 못했습니다. [저장 초기화 후 다시] → [카카오 로그인] 순서로 재시도하세요.',
+          false,
+        );
+        return;
+      }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        showToken(session.access_token);
+        setStatus('이미 로그인된 세션이 있습니다');
+      } else {
+        setStatus('준비됨 — 카카오 로그인 버튼을 누르세요');
+      }
+    }
+
+    async function startKakaoLogin(forceAccountPicker = false) {
+      loginBtn.disabled = true;
+      switchBtn.disabled = true;
+      setStatus(forceAccountPicker ? '다른 카카오 계정 선택 화면으로 이동...' : '카카오로 이동 중...');
+
+      if (window.location.search) {
+        history.replaceState({}, '', REDIRECT_TO);
+      }
+
+      if (forceAccountPicker) {
+        clearAuthStorage();
+        await supabase.auth.signOut();
+      }
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'kakao',
+        options: {
+          redirectTo: REDIRECT_TO,
+          queryParams: forceAccountPicker ? { prompt: 'login' } : undefined,
+        },
+      });
+
+      if (error) {
+        setStatus(error.message, false);
+        loginBtn.disabled = false;
+        switchBtn.disabled = false;
+        return;
+      }
+      if (!data?.url) {
+        setStatus('OAuth URL을 받지 못했습니다.', false);
+        loginBtn.disabled = false;
+        switchBtn.disabled = false;
+        return;
+      }
+      window.location.assign(data.url);
+    }
+
+    loginBtn.addEventListener('click', () => startKakaoLogin(false));
+
+    switchBtn.addEventListener('click', () => startKakaoLogin(true));
+
+    resetBtn.addEventListener('click', () => {
+      clearAuthStorage();
+      history.replaceState({}, '', REDIRECT_TO);
+      tokenEl.value = '';
+      copyBtn.disabled = true;
+      curlEl.textContent = '';
+      setStatus('초기화됨 — 카카오 로그인 버튼을 누르세요');
+      loginBtn.disabled = false;
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(tokenEl.value);
+      setStatus('access_token 복사됨');
+    });
+
+    loginBtn.disabled = false;
+    switchBtn.disabled = false;
+    resetBtn.disabled = false;
+    await handleCallback();
+    loginBtn.disabled = false;
+  </script>
+</body>
+</html>

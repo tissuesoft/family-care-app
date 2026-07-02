@@ -295,7 +295,7 @@ export class FamilyService {
     userId: string,
     inviteCode: string,
     relationshipLabel: string,
-    memberRole?: 'parent' | 'caregiver',
+    memberRole?: string,
   ) {
     const { data: invite, error } = await this.supabase.admin
       .from('family_invitations')
